@@ -10,8 +10,10 @@ quietbench controls what it can instead.
 Before the command starts, quietbench:
 
 - Refuses to run on battery.
-- Waits until the CPU has been idle and thermal pressure nominal for a while (30 seconds by default).
-- Sets `GOMAXPROCS` to the number of performance cores, unless you set it yourself.
+- Waits until other processes keep at most one core busy, at nominal thermal pressure,
+  for a while (30 seconds by default).
+- Sets `GOMAXPROCS` to one less than the number of performance cores, unless you set it yourself.
+  That leaves a performance core and the efficiency cores free for everything else.
 - Optionally turns on Low Power Mode, which caps clock speeds so they drift less as the chip heats up.
 
 While the command runs, quietbench keeps the Mac from sleeping and watches thermal pressure.
@@ -38,9 +40,10 @@ quietbench go test -run '^$' -bench . -count 10 ./pkg/foo > new.txt
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `-idle` | `95` | Percent of CPU time, across all cores, that must be idle before starting |
-| `-settle` | `30s` | How long the machine must stay idle at nominal thermal pressure before starting |
+| `-busy` | `1` | Cores other processes may keep busy on average, before and during the run |
+| `-settle` | `30s` | How long the machine must stay quiet at nominal thermal pressure before starting |
 | `-timeout` | `5m` | Give up if the machine hasn't settled by then; `0` waits forever |
+| `-procs` | performance cores − 1 | `GOMAXPROCS` for the command; `0` leaves it alone. A `GOMAXPROCS` you set yourself takes precedence |
 | `-lowpower` | off | Turn on Low Power Mode for the run and restore it afterwards; runs `sudo pmset` |
 
 quietbench exits with the command's exit code.

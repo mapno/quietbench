@@ -1,6 +1,5 @@
 // Command quietbench runs a benchmark on macOS once the machine is quiet, keeps
-// it on the performance cores and awake while it runs, and reports whether it
-// stayed quiet.
+// the Mac awake while it runs, and reports whether it stayed quiet.
 package main
 
 import (
@@ -17,9 +16,10 @@ import (
 )
 
 type options struct {
-	idle     float64
+	busy     float64
 	settle   time.Duration
 	timeout  time.Duration
+	procs    int
 	lowPower bool
 }
 
@@ -31,9 +31,11 @@ func main() {
 // restoring Low Power Mode always happens.
 func run() int {
 	var opts options
-	flag.Float64Var(&opts.idle, "idle", 95, "percent of CPU time, across all cores, that must be idle before starting")
-	flag.DurationVar(&opts.settle, "settle", 30*time.Second, "how long the machine must stay idle at nominal thermal pressure before starting")
+	perf, _, _ := cores()
+	flag.Float64Var(&opts.busy, "busy", 1, "cores other processes may keep busy on average, before and during the run")
+	flag.DurationVar(&opts.settle, "settle", 30*time.Second, "how long the machine must stay quiet at nominal thermal pressure before starting")
 	flag.DurationVar(&opts.timeout, "timeout", 5*time.Minute, "give up if the machine has not settled by then, 0 waits forever")
+	flag.IntVar(&opts.procs, "procs", max(perf-1, 0), "GOMAXPROCS for the command, one less than the performance cores by default, 0 leaves it alone")
 	flag.BoolVar(&opts.lowPower, "lowpower", false, "turn on Low Power Mode for the run and restore it afterwards, runs sudo pmset")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: quietbench [flags] command [args...]\n       quietbench            print the current conditions\n\n")
@@ -99,17 +101,17 @@ func bench(opts options, args []string) (int, error) {
 		}
 	}
 
-	perf, all, err := cores()
+	_, all, err := cores()
 	if err != nil {
 		return 1, err
 	}
 	env := os.Environ()
-	if _, set := os.LookupEnv("GOMAXPROCS"); !set && perf > 0 {
-		env = append(env, "GOMAXPROCS="+strconv.Itoa(perf))
-		logf("GOMAXPROCS=%d, the performance core count", perf)
+	if _, set := os.LookupEnv("GOMAXPROCS"); !set && opts.procs > 0 {
+		env = append(env, "GOMAXPROCS="+strconv.Itoa(opts.procs))
+		logf("GOMAXPROCS=%d", opts.procs)
 	}
 
-	if err := waitSettled(opts, th, sigs); err != nil {
+	if err := waitSettled(opts, all, th, sigs); err != nil {
 		return 1, err
 	}
 
@@ -181,10 +183,10 @@ func bench(opts options, args []string) (int, error) {
 	return code, nil
 }
 
-// waitSettled blocks until the CPU has been idle enough, at nominal thermal
-// pressure, for opts.settle without a break.
-func waitSettled(opts options, th *thermal, sigs <-chan os.Signal) error {
-	logf("waiting for %s of at least %g%% idle CPU at nominal thermal pressure", opts.settle, opts.idle)
+// waitSettled blocks until no more than opts.busy cores have been busy, at
+// nominal thermal pressure, for opts.settle without a break.
+func waitSettled(opts options, all int, th *thermal, sigs <-chan os.Signal) error {
+	logf("waiting for %s of at most %g cores busy at nominal thermal pressure", opts.settle, opts.busy)
 	prev, err := readCPU()
 	if err != nil {
 		return err
@@ -204,10 +206,10 @@ func waitSettled(opts options, th *thermal, sigs <-chan os.Signal) error {
 			if err != nil {
 				return err
 			}
-			idle := 100 * (1 - cur.busySince(prev))
+			busy := cur.busySince(prev) * float64(all)
 			p := th.level()
 
-			if idle >= opts.idle && p == 0 {
+			if busy <= opts.busy && p == 0 {
 				// The sample covers the time since the previous one, so the
 				// quiet stretch started then.
 				if quietSince.IsZero() {
@@ -224,10 +226,10 @@ func waitSettled(opts options, th *thermal, sigs <-chan os.Signal) error {
 
 			if opts.timeout > 0 && now.Sub(start) >= opts.timeout {
 				logf("busiest processes:\n%s", busiestProcesses())
-				return fmt.Errorf("not settled after %s: idle %.1f%%, thermal pressure %s", opts.timeout, idle, p)
+				return fmt.Errorf("not settled after %s: %.2f cores busy, thermal pressure %s", opts.timeout, busy, p)
 			}
 			if now.Sub(lastLog) >= 5*time.Second {
-				logf("waiting: idle %.1f%%, thermal pressure %s", idle, p)
+				logf("waiting: %.2f cores busy, thermal pressure %s", busy, p)
 				lastLog = now
 			}
 		}
@@ -243,15 +245,14 @@ func report(opts options, ps *os.ProcessState, wall time.Duration, busy float64,
 	if others < 0 {
 		others = 0
 	}
-	allowed := (100 - opts.idle) / 100 * float64(all)
 
 	logf("finished in %s, %s", wall.Round(time.Millisecond), ps)
 	logf("thermal pressure peaked at %s, other processes used %.2f cores on average", peak, others)
 	if peak != 0 {
 		logf("warning: thermal pressure rose above nominal, the CPU was likely throttled")
 	}
-	if others > allowed {
-		logf("warning: other processes used more than the %.2f cores allowed at the start", allowed)
+	if others > opts.busy {
+		logf("warning: other processes used more than the %g cores -busy allows", opts.busy)
 	}
 }
 
@@ -289,7 +290,7 @@ func status() error {
 	}
 	fmt.Printf("power             %s\n", power)
 	fmt.Printf("thermal pressure  %s\n", th.level())
-	fmt.Printf("cpu idle          %.1f%%\n", 100*(1-after.busySince(before)))
+	fmt.Printf("cpu busy          %.2f of %d cores\n", after.busySince(before)*float64(all), all)
 	fmt.Printf("low power mode    %s\n", lowPower)
 	fmt.Printf("cores             %d performance of %d\n", perf, all)
 	return nil
